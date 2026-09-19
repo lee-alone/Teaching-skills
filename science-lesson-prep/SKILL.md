@@ -72,6 +72,28 @@ python <skill>/scripts/bootstrap.py
   - 生物分子式正体，遗传学下划线转义为 `\_`。
 - **函数与科学图象规格**见 `references/figures.md`（使用 ````plot ... ```` 代码块）。
 
+渲染器支持的 Markdown 子集（写超纲语法会被静默忽略，所以只写这些）：
+
+| 语法 | 渲染结果 |
+| --- | --- |
+| `#` / `##` / `###` / `####` | 各级标题（黑体） |
+| `**加粗**` | 真正的粗体。**必须用这个写法，不要靠引号或书名号代替** |
+| `` `等宽` `` | 等宽行内文字（宋体，宽度与汉字对齐） |
+| `$...$` / `$$...$$` | 行内公式 / 独立居中公式（Office 原生对象） |
+| `-` 与 `1.` 列表 | 层级与组内编号按缩进还原；缩进加深即开新组并从 1 重新计数 |
+| `> 引用` | 楷体提示栏 + 浅底纹 |
+| `\| a \| b \|` 表格 | 带网格线与表头底纹的表格 |
+| ```` ```plot ```` | 函数图象（JSON 规格） |
+| ```` ```其他语言 ```` | **原样输出**（宋体等宽 + 浅底纹），用于板书设计、问题链架构图等 ASCII 图 |
+| `::: blank N` / `::: pagebreak` / `---` | 留白 / 分页 / 分隔线 |
+
+> **行内标记可以跨公式**：`**输入一个确定的 $x$ 就能唯一确定 $y$！**` 是正确的写法，
+> 引擎会先配平 `**` 再切公式，加粗段落里夹公式不会被拆坏。
+
+> **ASCII 图要控制在 55 字符当量以内**（一个汉字算 2）。
+> 板书设计的方框图常被画到 70+ 字符宽，A4 正文栏放不下，渲染器只能压到 6pt 才不折行，
+> 虽然不会折行但小到难认。超宽时 `render.py` 与 `qa_check.py` 都会给出提示。
+
 可参考 `assets/example-xuean.md` 与 `assets/example-wuli-xuean.md`（理科 Markdown 格式与公式图象语法示范）。
 
 ### 第 3 步：渲染为 Office 文档
@@ -96,11 +118,15 @@ python <skill>/scripts/bootstrap.py
 ### 第 4 步：公式与排版质检（必做）
 
 ```bash
-"<python>" <skill>/scripts/qa_check.py 文档.docx
-"<python>" <skill>/scripts/qa_check.py 课件.pptx --kind kejian
+# --source-md 指向渲染所用的那份 Markdown，启用逐块内容清点（强烈建议带上）
+"<python>" <skill>/scripts/qa_check.py 文档.docx --source-md doc.md
+"<python>" <skill>/scripts/qa_check.py 课件.pptx --kind kejian --source-md doc.md
 ```
 
 质检脚本专职检查：
+- **内容完整性（需 `--source-md`）**：Markdown 里每一块内容是否都在成品里——包括
+  代码块（板书设计、架构图）是否整块丢失、列表编号是否与源文件一致；
+- **行内标记残留**：正文里是否漏出 `**` 或反引号（说明行内标记没被渲染成格式）；
 - 是否残留 `$` 定界符或裸露的 LaTeX 命令；
 - 是否存在未修正的重音结构或空文本 run；
 - 公式内中文是否缺失中文字体导致方框；
@@ -108,13 +134,25 @@ python <skill>/scripts/bootstrap.py
 
 退出码 0 才算通过。
 
+> **只查 `$` 是不够的。** 曾经出现过 `qa_check.py` 零告警通过、成品却把教案的
+> 「主线架构图」「板书设计」整块丢掉、列表编号错乱的情况——这些缺陷全都发生在 `$` 之外。
+> 所以 `--source-md` 不是可选项，而是**交付前的必做动作**。
+
 > **关于"未发现原生公式对象"**：该提示只在「既无原生公式对象、也无任何图片」时判为问题。
 > 若本次使用 `--math-mode image`，公式本就以矢量图片呈现，脚本会输出一条**提示**而非错误，
 > 退出码仍为 0。反之，纯文字材料若既无公式也无图片，则会正常报错。
 
+> **`notes` 字段要读。** 例如「代码块偏宽：最宽约 74 字符当量……只能压到 6.0pt 显示」——
+> 这不是错误（脚本已保证不折行），但说明 Markdown 里那张图该收窄了。
+
 ### 第 5 步：交付
 
 将生成的文件给用户，并说明公式是 Word/PowerPoint 原生对象、双击可自由编辑。
+
+> **交付前对照 `references/qa-checklist.md` 走一遍。** 那里记着「脚本没报错但成品是坏的」
+> 这类翻车案例的核验方法：解包数原生公式、用 Word 排版引擎查折行与越界、
+> 以及本机环境的几个坑（python-docx 默认 Letter 不是 A4、Word 忽略负缩进、
+> PowerShell 的 COM 不可靠要改用 pywin32）。
 
 ## 脚本清单
 
@@ -182,7 +220,12 @@ $$x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}$$
    用 `\text{}` 写化学式，用 `\xrightarrow{}` 写反应条件：
    `$2\text{KClO}_3 \xrightarrow[\text{MnO}_2]{\Delta} 2\text{KCl} + 3\text{O}_2\uparrow$`。
    物理单位同样要写成正体 `$9.8\ \text{m/s}^2$`。详见 `references/subjects.md`。
-6. **每份材料生成后必须跑 `qa_check.py`。**
+6. **每份材料生成后必须跑 `qa_check.py`，并且必须带 `--source-md`。**
+   只跑不带源的版本等于只检查了公式，漏掉的正是「整块内容丢失」「编号错乱」
+   「行内标记没渲染」这几类最致命的缺陷。
+7. **验收不能只看「脚本没报错」。** 交付前还要确认：`md_items_missing` 为 0、
+   `residual_asterisk` 与 `residual_backtick` 为 0、`warnings` 与 `notes` 逐条看过。
+   渲染类交付的解包核验清单见 `references/qa-checklist.md`。
 
 ## 运行环境与可移植性
 

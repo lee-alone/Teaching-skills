@@ -12,12 +12,13 @@
 
 支持的 Markdown 子集：
     # / ## / ###      标题
-    普通段落           支持行内公式 $...$
-    - / 1.            无序 / 有序列表
+    普通段落           支持行内公式 $...$、**加粗**、`等宽`
+    - / 1.            无序 / 有序列表（层级与组内编号按缩进还原）
     > 引用            提示栏（楷体）
     | a | b |         表格
     $$...$$           独立居中公式
     ```plot ... ```   函数图象（内容为 JSON 规格）
+    ```其他语言 ```    原样输出（等宽 + 浅底纹，用于板书设计、架构图等 ASCII 图）
     ::: blank N       插入 N 行留白（导学案演算区）
     ::: pagebreak     分页
     ---               分隔线
@@ -67,6 +68,20 @@ BODY_SIZE = 10.5
 LINE_SPACING_PT = 20.0
 MARGIN_CM = 2.2
 
+# 代码块（含板书设计的 ASCII 方框图、主线架构图）排版。
+# 西文与中文都交给宋体：宋体的半角拉丁与全角汉字、制表符严格按 1:2 排布，
+# 这正是 ASCII 方框图赖以对齐的前提；换成 Consolas 反而会让方框错位。
+CODE_FONT = "宋体"
+CODE_FILL = "F4F6F3"
+CODE_SIZE_MAX = 9.0
+CODE_SIZE_MIN = 6.0
+CODE_SIZE_COMFORT = 8.0      # 低于此字号会在质检里提示「图过宽，建议收窄」
+CODE_FIT_SAFETY = 0.95       # 宽度余量：宋体半角并非严格等于半个全角，留 5% 防折行
+# 教案/导学案可用正文宽度：A4 21cm 减左右各 MARGIN_CM，再乘安全余量
+CODE_AVAIL_PT = (21.0 - 2 * MARGIN_CM) * 28.3465 * CODE_FIT_SAFETY
+# 课件正文框宽 11.9in，代码块按它自己的可用宽度单独估算
+PPTX_CODE_AVAIL_PT = 11.9 * 72 * CODE_FIT_SAFETY
+
 
 # ==========================================================================
 # 1. Markdown 解析
@@ -109,6 +124,101 @@ def split_table_row(line: str) -> list[str]:
             buf.append(ch)
     cells.append("".join(buf).strip())
     return cells
+
+
+# 行内标记：**加粗** 与 `等宽`。
+# 关键：本表在「按 $...$ 切分公式」之前使用，所以
+# 「**输入一个确定的 $x$，能否唯一确定一个 $y$！**」这类加粗里夹公式的写法
+# 不会被公式边界打断——先配平加粗，再在加粗段内部切公式。
+_INLINE_MARK = re.compile(r"\*\*(.+?)\*\*|`([^`]+)`", re.S)
+
+# 列表行：[缩进][标记][正文]
+_LIST_ITEM = re.compile(r"^(\s*)([-*+]|\d+[.、)])\s+(.*)$")
+
+
+def split_inline(text: str, base_bold: bool = False) -> list[tuple[str, bool, bool]]:
+    """把一段文本按行内标记切成 [(文本, 是否加粗, 是否等宽)]。
+
+    只识别 **加粗** 与 `等宽`。未配对的孤立标记按普通文字原样保留——
+    宁可留下一个星号让人看见，也不要把后面的整段正文吞进标记里。
+    """
+    out: list[tuple[str, bool, bool]] = []
+    pos = 0
+    for m in _INLINE_MARK.finditer(text):
+        if m.start() > pos:
+            out.append((text[pos:m.start()], base_bold, False))
+        if m.group(1) is not None:
+            out.append((m.group(1), True, False))
+        else:
+            out.append((m.group(2), base_bold, True))
+        pos = m.end()
+    if pos < len(text):
+        out.append((text[pos:], base_bold, False))
+    return out
+
+
+def _is_wide(ch: str) -> bool:
+    """是否为全角字符（等宽排版里占两个半角位）。含制表符，方框图靠它对齐。"""
+    o = ord(ch)
+    return (0x1100 <= o <= 0x115F or 0x2500 <= o <= 0x257F or 0x2E80 <= o <= 0xA4CF
+            or 0xAC00 <= o <= 0xD7A3 or 0xF900 <= o <= 0xFAFF or 0xFE30 <= o <= 0xFE4F
+            or 0xFF00 <= o <= 0xFF60 or 0xFFE0 <= o <= 0xFFE6)
+
+
+def code_block_width(lines: list[str]) -> float:
+    """按「全角=1、半角=0.5」估算代码块最宽一行的字符当量宽度。"""
+    return max((sum(1.0 if _is_wide(c) else 0.5 for c in ln) for ln in lines), default=0.0)
+
+
+def fit_code_size(lines: list[str], avail_pt: float = CODE_AVAIL_PT) -> float:
+    """选一个让代码块不折行的字号。
+
+    方框图一旦折行就彻底废掉，所以宁可压小字号也不允许折行；
+    下限 CODE_SIZE_MIN 兜底，低于 CODE_SIZE_COMFORT 时由调用方写入告警。
+    """
+    widest = code_block_width(lines)
+    if widest <= 0:
+        return CODE_SIZE_MAX
+    return max(CODE_SIZE_MIN, min(CODE_SIZE_MAX, avail_pt / widest))
+
+
+def parse_list_run(lines: list[str], i: int, n: int) -> tuple[list[dict], int]:
+    """解析一段连续的列表行，返回 (items, 下一行下标)。
+
+    每一项自带 ordered 与编号：只有「同一缩进 + 同一标记类型」才算同一组，
+    编号在组内递增；缩进加深即开新组，并从其显式编号（或 1）重新计数。
+
+    这样教案里并列的「学生活动 / 设计意图 / 评价点」不会被并进
+    「教师活动」的 1./2./3. 序列（旧版会把它们编成 6./10./11.），
+    「剖析函数三要素」的子项也不会被提到顶层重新编号。
+    """
+    items: list[dict] = []
+    stack: list[list] = []          # [[缩进, 是否有序, 当前编号], ...]
+    while i < n:
+        mm = _LIST_ITEM.match(lines[i])
+        if not mm:
+            break
+        indent = len(mm.group(1))
+        marker = mm.group(2)
+        ordered = bool(re.match(r"\d", marker))
+        start = int(re.match(r"\d+", marker).group()) if ordered else 1
+        text = mm.group(3).strip()
+
+        while stack and indent < stack[-1][0]:
+            stack.pop()
+        if not stack or indent > stack[-1][0]:
+            stack.append([indent, ordered, start])
+        elif stack[-1][1] != ordered:
+            stack[-1] = [indent, ordered, start]
+        else:
+            stack[-1][2] += 1
+
+        items.append({"level": min(indent // 2, 3),
+                      "ordered": stack[-1][1],
+                      "num": stack[-1][2],
+                      "text": text})
+        i += 1
+    return items, i
 
 
 def parse_markdown(md: str) -> list[dict]:
@@ -203,18 +313,9 @@ def parse_markdown(md: str) -> list[dict]:
             continue
 
         # 列表
-        m = re.match(r"^(\s*)([-*+]|\d+[.、)])\s+(.*)$", line)
-        if m:
-            ordered = bool(re.match(r"\d+", m.group(2)))
-            items = []
-            while i < n:
-                mm = re.match(r"^(\s*)([-*+]|\d+[.、)])\s+(.*)$", lines[i])
-                if not mm:
-                    break
-                indent = len(mm.group(1))
-                items.append({"level": min(indent // 2, 2), "text": mm.group(3).strip()})
-                i += 1
-            blocks.append({"type": "ol" if ordered else "ul", "items": items})
+        if _LIST_ITEM.match(line):
+            items, i = parse_list_run(lines, i, n)
+            blocks.append({"type": "list", "items": items})
             continue
 
         # 普通段落（合并连续行）
@@ -293,6 +394,10 @@ def render_docx(blocks: list[dict], meta: dict, out_path: str, *,
     st.font.size = Pt(BODY_SIZE)
     st.element.rPr.rFonts.set(qn("w:eastAsia"), BODY_FONT)
     sec = doc.sections[0]
+    # 必须显式指定 A4：python-docx 默认模板是 Letter（8.5×11in = 612×792pt），
+    # 不指定的话国内打印会与 A4 纸张不匹配，代码块的宽度估算也会跟着偏。
+    sec.page_width = Cm(21.0)
+    sec.page_height = Cm(29.7)
     sec.top_margin = sec.bottom_margin = Cm(MARGIN_CM)
     sec.left_margin = sec.right_margin = Cm(MARGIN_CM)
 
@@ -321,35 +426,78 @@ def render_docx(blocks: list[dict], meta: dict, out_path: str, *,
         return p
 
     def add_rich(p, text, font=BODY_FONT, size=BODY_SIZE, bold=False, color=None):
-        """把「文字 + $公式$ + 文字」按顺序写入段落，公式走原生对象或图片。"""
-        for kind, val in O.split_latex(text):
-            if kind == "t":
-                if not val:
-                    continue
-                r = p.add_run(val)
-                style_run(r, font, size, bold, color)
-            else:
-                val = clean_latex(val)
-                if not val:
-                    continue
-                if math_mode == "image":
-                    img = _math_image(val, work_dir, stats, size)
-                    if img:
-                        p.add_run().add_picture(img, height=Pt(size * 1.45))
+        """把「文字 + 行内标记 + $公式$」按顺序写入段落，公式走原生对象或图片。
+
+        先按 **加粗** / `等宽` 配平，再在每一段内部按 $...$ 切公式，
+        因此「**输入一个确定的 $x$**」这类加粗里夹公式的写法可以正确渲染：
+        加粗会传递给同一段内的文字 run，公式本身仍是原生对象。
+        """
+        for seg, seg_bold, seg_code in split_inline(text, bold):
+            if not seg:
+                continue
+            seg_font = CODE_FONT if seg_code else font
+            seg_size = min(size, CODE_SIZE_MAX) if seg_code else size
+            for kind, val in O.split_latex(seg):
+                if kind == "t":
+                    if not val:
                         continue
-                try:
-                    p._p.append(O.latex_to_omml(val, size_pt=size, cjk_font=BODY_FONT))
-                    stats["math"] += 1
-                except Exception as exc:  # noqa: BLE001
-                    # auto：原生转换失败时退回矢量图片，图片也失败才保留原文
-                    if math_mode == "auto":
+                    r = p.add_run(val)
+                    style_run(r, seg_font, seg_size, seg_bold, color)
+                else:
+                    val = clean_latex(val)
+                    if not val:
+                        continue
+                    if math_mode == "image":
                         img = _math_image(val, work_dir, stats, size)
                         if img:
                             p.add_run().add_picture(img, height=Pt(size * 1.45))
                             continue
-                    stats["warnings"].append(f"公式转换失败，已按原文保留：{val}（{exc}）")
-                    r = p.add_run(val)
-                    style_run(r, font, size, bold, color)
+                    try:
+                        p._p.append(O.latex_to_omml(val, size_pt=size, cjk_font=BODY_FONT))
+                        stats["math"] += 1
+                    except Exception as exc:  # noqa: BLE001
+                        # auto：原生转换失败时退回矢量图片，图片也失败才保留原文
+                        if math_mode == "auto":
+                            img = _math_image(val, work_dir, stats, size)
+                            if img:
+                                p.add_run().add_picture(img, height=Pt(size * 1.45))
+                                continue
+                        stats["warnings"].append(f"公式转换失败，已按原文保留：{val}（{exc}）")
+                        r = p.add_run(val)
+                        style_run(r, seg_font, seg_size, seg_bold, color)
+
+    def add_code_block(text, label=""):
+        """原样输出代码块：等宽字体 + 浅底纹 + 零段距，保住 ASCII 方框图的列对齐。
+
+        旧版块循环里没有 code 分支，非 plot 的 ``` 块被静默丢弃，
+        教案的「主线架构图」与「板书设计」就是这样整块消失的。
+
+        字号只按正文栏宽自适应，**不用负缩进往页边距里挤**：
+        实测 Word 会完全忽略负的左右缩进（w:ind w:left="-794" 写了也不生效），
+        指望它把方框图撑到页边距只会得到一个依赖「无断点长横线自动溢出」的
+        偶然结果——一旦某行有空格，Word 就在空格处折行，图就废了。
+        方框图一旦折行无法挽回，所以宁可压小字号也保证不折行；
+        压到 CODE_SIZE_COMFORT 以下时写入告警，提示去 Markdown 里把图收窄。
+        """
+        lines = text.split("\n")
+        size = fit_code_size(lines)
+        if size < CODE_SIZE_COMFORT:
+            widest = code_block_width(lines)
+            stats["warnings"].append(
+                f"代码块过宽：{label or lines[0][:20]} 最宽约 {widest:.0f} 字符当量，"
+                f"已压到 {size:.1f}pt 以避免折行。正文栏宽（A4）只放得下 "
+                f"{int(CODE_AVAIL_PT / CODE_SIZE_COMFORT)} 字符当量，"
+                f"建议在 Markdown 中把该图收窄到 {int(CODE_AVAIL_PT / CODE_SIZE_COMFORT)} "
+                f"字符以内，即可用 8pt 正常显示")
+        for ln in lines:
+            p = new_para(space_after=0, spacing=size * 1.45)
+            pf = p.paragraph_format
+            pf.left_indent = Cm(0.2)
+            pf.right_indent = Cm(0.2)
+            r = p.add_run(ln if ln else " ")
+            style_run(r, CODE_FONT, size)
+            shade(p, CODE_FILL)
+        new_para(space_after=4)
 
     def shade(cell_or_para, hex_fill):
         el = cell_or_para._tc if hasattr(cell_or_para, "_tc") else cell_or_para._p.get_or_add_pPr()
@@ -378,7 +526,7 @@ def render_docx(blocks: list[dict], meta: dict, out_path: str, *,
             size = {1: 15, 2: 13, 3: 12, 4: 11}[level]
             p = new_para(space_after=4, spacing=22)
             p.paragraph_format.space_before = Pt(8 if level <= 2 else 5)
-            style_run(p.add_run(blk["text"]), HEAD_FONT, size, True)
+            add_rich(p, blk["text"], font=HEAD_FONT, size=size, bold=True)
 
         elif t == "p":
             p = new_para()
@@ -406,13 +554,19 @@ def render_docx(blocks: list[dict], meta: dict, out_path: str, *,
                 stats["warnings"].append(f"公式转换失败：{latex}（{exc}）")
                 style_run(p.add_run(latex))
 
-        elif t in ("ul", "ol"):
-            for idx, item in enumerate(blk["items"], 1):
+        elif t in ("ul", "ol", "list"):
+            for item in blk["items"]:
                 p = new_para(space_after=2)
                 p.paragraph_format.left_indent = Cm(0.75 + item["level"] * 0.6)
-                mark = f"{idx}. " if t == "ol" else "· "
+                # 编号来自解析期算好的组内序号，不是渲染期的全局序号：
+                # 无序项固定「·」，有序项用它自己那一组的计数（缩进加深即从 1 重来）。
+                ordered = item.get("ordered", t == "ol")
+                mark = f"{item.get('num', 1)}. " if ordered else "· "
                 style_run(p.add_run(mark), BODY_FONT, BODY_SIZE)
                 add_rich(p, item["text"])
+
+        elif t == "code":
+            add_code_block(blk["text"], label=(blk.get("lang") or ""))
 
         elif t == "quote":
             p = new_para(space_after=6, indent=0.6)
@@ -543,10 +697,19 @@ def render_pptx(blocks: list[dict], meta: dict, out_path: str, *,
         tf.word_wrap = True
         return tf
 
-    def set_para_style(p, size=18, bold=False, color=None, align=None, space_after=6):
+    def set_para_style(p, size=18, bold=False, color=None, align=None, space_after=6,
+                       keep_runs=False):
+        """统一段落字号/字体。
+
+        keep_runs=True 时只设段落级属性，不覆盖 run：调用方若已用
+        fill_paragraph 写入内容，run 上带着行内 **加粗** 等属性，
+        这里再统一赋 bold 会把它们抹掉。
+        """
         p.space_after = Pt(space_after)
         if align is not None:
             p.alignment = align
+        if keep_runs:
+            return
         for r in p.runs:
             r.font.size = Pt(size)
             r.font.bold = bold
@@ -555,27 +718,33 @@ def render_pptx(blocks: list[dict], meta: dict, out_path: str, *,
                 r.font.color.rgb = RGBColor.from_string(color)
 
     def fill_paragraph(p_xml, text, size=18, bold=False, color=None, indent=0):
-        """在已有 a:p 上按「文字 + 公式」顺序写入内容。"""
+        """在已有 a:p 上按「文字 + 行内标记 + 公式」顺序写入内容。"""
         if indent:
             ppr = etree.Element(f"{{{A}}}pPr")
             ppr.set("marL", str(int(indent * 457200)))
             p_xml.insert(0, ppr)
-        for kind, val in O.split_latex(text):
-            if kind == "t":
-                if not val:
-                    continue
-                p_xml.append(O.pptx_text_run(val, size, bold=bold, color=color, font=UI_FONT))
-            else:
-                val = clean_latex(val)
-                if not val:
-                    continue
-                try:
-                    root = O.latex_to_omml(val, size_pt=size, cjk_font=UI_FONT, target="pptx")
-                    p_xml.append(O.pptx_math_element(root, display=False))
-                    stats["math"] += 1
-                except Exception as exc:  # noqa: BLE001
-                    stats["warnings"].append(f"公式转换失败：{val}（{exc}）")
-                    p_xml.append(O.pptx_text_run(val, size, color=color, font=UI_FONT))
+        for seg, seg_bold, seg_code in split_inline(text, bold):
+            if not seg:
+                continue
+            for kind, val in O.split_latex(seg):
+                if kind == "t":
+                    if not val:
+                        continue
+                    p_xml.append(O.pptx_text_run(
+                        val, min(size, 16) if seg_code else size,
+                        bold=seg_bold, color=color,
+                        font=CODE_FONT if seg_code else UI_FONT))
+                else:
+                    val = clean_latex(val)
+                    if not val:
+                        continue
+                    try:
+                        root = O.latex_to_omml(val, size_pt=size, cjk_font=UI_FONT, target="pptx")
+                        p_xml.append(O.pptx_math_element(root, display=False))
+                        stats["math"] += 1
+                    except Exception as exc:  # noqa: BLE001
+                        stats["warnings"].append(f"公式转换失败：{val}（{exc}）")
+                        p_xml.append(O.pptx_text_run(val, size, color=color, font=UI_FONT))
 
     def next_p(tf, state):
         """取下一个段落。首次复用占位段（先清空其内容），之后新建。"""
@@ -670,22 +839,32 @@ def render_pptx(blocks: list[dict], meta: dict, out_path: str, *,
             kind = it["kind"]
             if kind == "h3":
                 p = next_p(tf_body, state)
-                p.text = it["text"]
-                set_para_style(p, 22, True, "2C2C2A", space_after=8)
+                fill_paragraph(p._p, it["text"], 22, bold=True, color="2C2C2A")
+                set_para_style(p, 22, space_after=8, keep_runs=True)
             elif kind == "p":
                 p = next_p(tf_body, state)
                 fill_paragraph(p._p, it["blk"]["text"], 18)
-                set_para_style(p, 18, space_after=8)
-            elif kind in ("ul", "ol"):
-                for i, item in enumerate(it["blk"]["items"], 1):
+                set_para_style(p, 18, space_after=8, keep_runs=True)
+            elif kind in ("ul", "ol", "list"):
+                for item in it["blk"]["items"]:
                     p = next_p(tf_body, state)
-                    mark = f"{i}. " if kind == "ol" else "· "
+                    # 与 DOCX 同源：编号取解析期算好的组内序号
+                    ordered = item.get("ordered", kind == "ol")
+                    mark = f"{item.get('num', 1)}. " if ordered else "· "
                     fill_paragraph(p._p, mark + item["text"], 18, indent=item["level"])
-                    set_para_style(p, 18, space_after=6)
+                    set_para_style(p, 18, space_after=6, keep_runs=True)
             elif kind == "quote":
                 p = next_p(tf_body, state)
                 fill_paragraph(p._p, it["blk"]["text"], 17, color="44546A")
-                set_para_style(p, 17, color="44546A", space_after=8)
+                set_para_style(p, 17, color="44546A", space_after=8, keep_runs=True)
+            elif kind == "code":
+                # 课件里的代码块（架构图等）：按行原样输出，字号随最长行自适应
+                lines = it["blk"]["text"].split("\n")
+                csize = fit_code_size(lines, PPTX_CODE_AVAIL_PT)
+                for ln in lines:
+                    p = next_p(tf_body, state)
+                    fill_paragraph(p._p, ln if ln else " ", csize, color="3A3A38")
+                    set_para_style(p, csize, space_after=0, keep_runs=True)
             elif kind == "dmath":
                 p = next_p(tf_body, state)
                 add_display_math(p, it["blk"]["latex"], 22)
