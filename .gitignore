@@ -1,0 +1,15 @@
+.vscode/
+.idea/
+.git/
+.settings/
+.env/
+.cache/
+.python-version
+.DS_Store
+.workbuddy-ai
+
+# 如果你还想忽略其他隐藏目录，可继续追加：
+# .workbuddy-ai/
+# .venv/
+# .mypy_cache/
+# .pytest_cache/
