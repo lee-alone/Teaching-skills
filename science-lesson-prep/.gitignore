@@ -1,0 +1,9 @@
+# 运行期生成的依赖与缓存，不要提交
+.venv/
+venv/
+node_modules/
+__pycache__/
+*.py[cod]
+
+# 渲染中间产物
+_assets/
