@@ -1,16 +1,15 @@
 # -*- coding: utf-8 -*-
-"""教学材料生成后的自动质检。
+"""理科文档公式与排版生成后的自动质检。
 
 用法：
-    python qa_check.py 教案.docx
+    python qa_check.py 文档.docx
     python qa_check.py 课件.pptx --kind kejian
-    python qa_check.py 教案.docx --kind jiaoan --json
+    python qa_check.py 文档.docx --json
 
 检查项分两类：
   A. 数学公式专项 —— 残存 $ 定界符、裸露 LaTeX 命令、未修正的重音结构、
      空文本 run、公式内中文缺字体、公式对象数量
-  B. 教学内容完整性 —— 教案必备板块是否齐备（学情/目标/重难点/过程/板书/作业/反思）
-  C. 版面 —— 图片数量、PPT 形状是否越出画布
+  B. 版面与元素 —— 图片与表格统计、PPT 形状是否越出画布
 
 退出码：0 = 通过；1 = 存在必须修复的问题；2 = 文件无法读取
 """
@@ -40,29 +39,6 @@ ALLOWED_UNICODE_MATH = set("∈∉⊆⊂∪∩∅∞≤≥≠±×÷→←↔⇒�
 
 ACCENT_CHARS = {"^", "~", "˙", "¯", "―", "→", "⃗", "̄", "̃", "̂", "̇"}
 
-# 必备板块：每项是一组「同义写法」，命中任一即视为具备。
-# 用同义组而不是单一词，是因为教师对同一板块的叫法不统一
-# （例如"练习"也常写作"当堂检测""课堂练习"），按字面匹配会误报。
-REQUIRED_SECTIONS = {
-    "jiaoan": [
-        ("学情分析", "学情"),
-        ("教学目标",),
-        ("重难点", "教学重点", "教学难点"),
-        ("教学过程", "教学环节"),
-        ("板书",),
-        ("作业",),
-        ("反思",),
-    ],
-    "xuean": [
-        ("学习目标", "学习任务"),
-        ("探究",),
-        ("练习", "当堂检测", "当堂练习", "课堂练习", "巩固练习", "变式训练", "检测"),
-        ("小结", "总结", "归纳"),
-    ],
-}
-
-SECTION_LABEL = {"jiaoan": "教案", "xuean": "导学案"}
-
 
 def read_parts(path: str, prefixes: tuple[str, ...]) -> dict[str, str]:
     """读出 OOXML 包内匹配前缀的 XML 文本。"""
@@ -76,6 +52,7 @@ def read_parts(path: str, prefixes: tuple[str, ...]) -> dict[str, str]:
 
 def check_math(parts: dict[str, str], issues: list, stats: dict, is_pptx: bool) -> None:
     total_math = 0
+    total_images = 0
     for name, xml in parts.items():
         label = os.path.basename(name)
 
@@ -119,28 +96,28 @@ def check_math(parts: dict[str, str], issues: list, stats: dict, is_pptx: bool) 
                     break
 
         total_math += len(re.findall(r"<m:oMath[ >]", xml))
+        total_images += len(re.findall(r"<a:blip", xml))
 
     stats["math_objects"] = total_math
-    if total_math == 0 and parts:
+    stats["math_images"] = total_images
+    # 公式数量为 0 时不要一律判错：--math-mode image 模式下公式本就以图片形式存在。
+    # 只有「既没有原生公式对象、也没有任何图片」时才可能是转换链路真出了问题。
+    if total_math == 0 and total_images == 0 and parts:
         issues.append("[公式] 未发现任何原生公式对象；若材料本应含公式，请检查转换链路")
+    elif total_math == 0 and total_images and parts:
+        stats.setdefault("notes", []).append(
+            "未发现原生公式对象，但检测到图片——若本次使用 --math-mode image，"
+            "这是预期结果（公式以矢量图片呈现）；若预期原生公式，请改用 --math-mode native 重跑。"
+        )
 
 
-def check_docx(path: str, issues: list, stats: dict, kind: str | None) -> None:
+def check_docx(path: str, issues: list, stats: dict, kind: str | None = None) -> None:
     parts = read_parts(path, ("word/",))
     check_math(parts, issues, stats, is_pptx=False)
 
     doc = parts.get("word/document.xml", "")
     stats["images"] = len(re.findall(r"<a:blip", doc))
     stats["tables"] = doc.count("<w:tbl>")
-
-    # 教学内容完整性
-    if kind in REQUIRED_SECTIONS:
-        missing = [group[0] for group in REQUIRED_SECTIONS[kind]
-                   if not any(alt in doc for alt in group)]
-        stats["sections_missing"] = missing
-        if missing:
-            label = SECTION_LABEL.get(kind, "材料")
-            issues.append(f"[内容] {label}缺少必备板块：{'、'.join(missing)}")
 
 
 def check_pptx(path: str, issues: list, stats: dict) -> None:
@@ -204,6 +181,8 @@ def main() -> int:
                 print("  -", it)
         else:
             print("质检通过：未发现问题。")
+        for note in stats.get("notes", []):
+            print(f"  提示：{note}")
     return 0 if not issues else 1
 
 

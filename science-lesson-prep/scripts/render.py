@@ -724,8 +724,69 @@ def render_pptx(blocks: list[dict], meta: dict, out_path: str, *,
     saved, note = safe_save(prs.save, out_path)
     if note:
         stats["warnings"].append(note)
+    _fix_slide_size_type(saved)
     stats["output"] = saved
     return stats
+
+
+def _fix_slide_size_type(path: str) -> None:
+    """修正 PPTX 的幻灯片版式标记。
+
+    python-pptx 默认模板会在 <p:sldSz> 上写死 type="screen4x3"，即使我们把
+    宽高改成了 16:9（13.333 × 7.5 英寸）。部分阅读器会据此按 4:3 打开，
+    导致右侧留白或被裁切。这里按实际宽高比改写 type，与实际尺寸保持一致。
+    """
+    import zipfile
+    import shutil
+    import tempfile
+    import re as _re
+
+    try:
+        with zipfile.ZipFile(path) as z:
+            items = [(i, z.read(i.filename)) for i in z.infolist()]
+            pres = z.read("ppt/presentation.xml").decode("utf-8")
+    except Exception:
+        return
+
+    m = _re.search(r'<p:sldSz([^/>]*)/>', pres)
+    if not m:
+        return
+    attrs = m.group(1)
+    cx = _re.search(r'cx="(\d+)"', attrs)
+    cy = _re.search(r'cy="(\d+)"', attrs)
+    if not (cx and cy):
+        return
+    ratio = int(cx.group(1)) / max(int(cy.group(1)), 1)
+    if abs(ratio - 16 / 9) < 0.02:
+        new_type = "screen16x9"
+    elif abs(ratio - 4 / 3) < 0.02:
+        new_type = "screen4x3"
+    else:
+        return
+
+    if _re.search(r'type="[^"]*"', attrs):
+        new_attrs = _re.sub(r'type="[^"]*"', f'type="{new_type}"', attrs)
+        if new_attrs == attrs:
+            return
+    else:
+        new_attrs = attrs + f' type="{new_type}"'
+
+    new_pres = pres.replace(m.group(0), f'<p:sldSz{new_attrs}/>', 1)
+
+    tmp = tempfile.mkstemp(suffix=".pptx")[1]
+    try:
+        with zipfile.ZipFile(path) as zin, zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
+            for info, data in items:
+                if info.filename == "ppt/presentation.xml":
+                    data = new_pres.encode("utf-8")
+                zout.writestr(info, data)
+        shutil.move(tmp, path)
+    except Exception:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 
 def _pptx_table(slide, blk, left, top, width, fill_fn, stats):

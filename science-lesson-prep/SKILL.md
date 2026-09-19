@@ -1,34 +1,52 @@
 ---
 name: science-lesson-prep
-description: 理科备课助手——生成理科（数学、物理、化学、生物）备课材料，包括教案、导学案、教学课件，并保证数学公式在 Word 与 PowerPoint 中正确显示。当用户需要写教案、备课、做导学案、做课件、准备一节课，或反馈"公式在 docx/pptx 里显示不对""公式变成乱码或源码""数学符号变成方框"时使用。也适用于需要绘制函数图象、设计板书、整理教学过程的场景。本技能通过脚本把 LaTeX 公式落地为 Office 原生数学对象，不依赖 LaTeX 发行版。
+description: 理科符号规范与文档排版助手——专门用于科学学科（数学、物理、化学、生物）的文件创建、符号与公式标准化书写，以及将包含理科公式的 Markdown 文档排版渲染为 Word (.docx) 与 PowerPoint (.pptx) 原生可编辑格式。当涉及理科符号/公式书写规范（LaTeX 语法、化学方程式与反应条件、物理矢量与正体单位、生物遗传符号）、函数与科学图象绘制（plot 语法）、公式在 docx/pptx 中乱码或方框排查，或需要将理科文档/试卷/讲义/学案排版渲染为原生 Office 文件时使用。注：教案与教学设计逻辑由 lesson-plan 技能负责，本技能专助理科符号规范与文档排版渲染。
 agent_created: true
 ---
 
-# 理科备课助手
+# 理科符号规范与文档排版助手
 
 ## 这个技能解决什么问题
 
-教师备课材料里的数学公式，在 Word 与 PowerPoint 中经常显示错误：变成 `\frac{a}{b}` 源码、
-变成方块乱码、根号横线断裂、重音符号飘到字符外面。
+科学学科（数学、物理、化学、生物）文件中的公式与特殊符号，在导出为 Word 与 PowerPoint 时经常显示错误：变成 `\frac{a}{b}` 源码、变成方块乱码、根号横线断裂、重音符号飘到字符外面、或者化学方程式与物理单位变成斜体变量。
 
-根因是：模型能写出正确的 LaTeX，但**没有能力手写 OOXML**。规范写得再详细也解决不了这个问题——
-必须有一条可执行的转换通道。
+根因是：
+1. **符号规范不统一**：不慎使用了 Unicode 上下标（如 `x²`、`H₂O`）导致缺少字形变方框，或使用了 Office 无法解析的 LaTeX 宏包（如 `\ce{}`）。
+2. **缺乏原生转换通道**：模型能写出正确的 LaTeX，但**没有能力手写 OOXML**。规范写得再详细也解决不了这个问题——必须有一条可执行的转换通道。
 
-本技能提供这条通道：模型只写 `$...$`，脚本负责把公式转成 Office 原生数学对象（OMML）。
+本技能提供全套解决方案：
+- **符号规范化**：建立数学、物理、化学、生物各学科规范的符号与表达式写法。
+- **原生排版通道**：模型只写标准 Markdown 与 `$...$`，脚本负责把公式转成 Office 原生数学对象（OMML）并绘制函数图象。
 
 **核心原则：内容生成与文件排版分离。模型写 Markdown，脚本做排版，模型绝不碰 XML。**
 
+## 两个技能的职责分工与协作
+
+| 场景 | 负责技能 |
+| --- | --- |
+| 撰写教案、教学设计、设计教学主线、问题链、三维目标、环节四要素 | **`lesson-plan`**（教案编写助手） |
+| 判断教案结构是否完整、教学逻辑是否闭环 | **`lesson-plan`**（运行 `check_plan.py`） |
+| 理科符号与公式标准化书写（LaTeX、化学正体、物理单位正体、矢量等） | **本技能**（查阅 `references/math-syntax.md`、`subjects.md`） |
+| 绘制函数图象与科学曲线 | **本技能**（使用 ````plot ... ```` 语法） |
+| 将 Markdown 渲染为 Word（DOCX）或幻灯片（PPTX）原生可编辑文档 | **本技能**（运行 `render.py`） |
+| 检查公式转换是否完整、是否有残留源码或 PPT 排版越界 | **本技能**（运行 `qa_check.py`） |
+
+> **标准协作流程**：
+> 若用户需要一份**包含理科公式的 Word/PowerPoint 教案**：
+> 1. 先由 `lesson-plan` 技能完成教学设计，生成符合 12 大板块、四要素及对照表要求的 Markdown 内容（公式采用 LaTeX 书写）；
+> 2. 由本技能按照理科符号规范对公式、图象及排版标记进行核验；
+> 3. 调用本技能的 `render.py` 渲染为 `.docx` 或 `.pptx`；
+> 4. 调用本技能的 `qa_check.py` 质检公式完整性并交付用户。
+
 ## 执行流程
 
-### 第 1 步：环境自检（每次必做）
+### 第 1 步：环境自检（首次必做）
 
 ```bash
 python <skill>/scripts/bootstrap.py
 ```
 
-检查 Python 依赖、Node 依赖与中文字体，缺什么自动装什么。
-
-依赖装在**可移植的隔离位置**，不污染全局环境，也不假设任何平台专有目录存在：
+检查 Python 依赖、Node 依赖与中文字体，缺什么自动装什么。依赖装在隔离位置，不污染全局环境：
 
 | 平台 | 默认位置 |
 | --- | --- |
@@ -36,67 +54,67 @@ python <skill>/scripts/bootstrap.py
 | Linux | `~/.cache/science-lesson-prep/` |
 | macOS | `~/Library/Caches/science-lesson-prep/` |
 
-最后一行输出 JSON：
-
-- `ok: true` 表示就绪；为 `false` 时先按 `messages` 处理再继续。
-- **`python` 字段是后续所有脚本应当使用的解释器路径。**
+最后一行输出 JSON，其中 `python` 字段是后续所有脚本应当使用的解释器路径。
 
 > **第 3、4 步务必用 `python` 字段的值来调用脚本。**
 > 直接用系统全局 Python 可能因缺少依赖而失败（典型症状：图象报
 > `缺 matplotlib 无法生成函数图象`）。脚本已内置兜底——检测到关键依赖缺失时
-> 会自动切换到隔离解释器重新执行，并在 stderr 打印一行 `[env] … 重新执行`。
-> 但这只是兜底，正常流程仍应显式使用 `python` 字段。
+> 会自动切换到隔离解释器重新执行。
 
-### 第 2 步：编写 Markdown 中间表示
+### 第 2 步：按符号规范编写 Markdown
 
-把教学内容写成 Markdown，公式用 `$...$`（行内）与 `$$...$$`（独立成行）。
+把理科内容写成 Markdown，公式用 `$...$`（行内）与 `$$...$$`（独立成行）：
 
-- 公式书写规范见 `references/math-syntax.md`——**必读**，其中列了必须避免的写法。
-- 教学设计的必备板块与写作要求见 `references/pedagogy.md`。
-- 函数图象规格见 `references/figures.md`。
-- **物理 / 化学 / 生物的写法见 `references/subjects.md`**——写非数学科目时**必读**。
-  化学方程式尤其要注意：`\ce{}` 不受支持，必须用 `\text{}` + `\xrightarrow{}` 写。
+- **数学公式书写规范**见 `references/math-syntax.md`——**必读**，列出了必须避免的写法（如 Unicode 上下标、斜杠分数等）。
+- **物理 / 化学 / 生物分科符号规范**见 `references/subjects.md`——**必读**。
+  - 化学方程式尤其要注意：`\ce{}` 不受支持，必须用 `\text{}` 正体 + `\xrightarrow{}` 条件写。
+  - 物理单位必须用 `\text{}` 正体（如 `$9.8\ \text{m/s}^2$`），矢量用 `\vec{}`。
+  - 生物分子式正体，遗传学下划线转义为 `\_`。
+- **函数与科学图象规格**见 `references/figures.md`（使用 ````plot ... ```` 代码块）。
 
-同一节课若需同时产出教案与课件，先完成一份完整教学设计，再据此分别改写成
-`jiaoan` 版与 `kejian` 版 Markdown（同源异构，见 `references/pedagogy.md`）。
+可参考 `assets/example-xuean.md` 与 `assets/example-wuli-xuean.md`（理科 Markdown 格式与公式图象语法示范）。
 
-可参考 `assets/example-xuean.md`（一份完整的数学导学案，覆盖了本技能支持的全部语法）。
-
-### 第 3 步：渲染
+### 第 3 步：渲染为 Office 文档
 
 ```bash
 # 用第 1 步 JSON 里的 python 字段作为解释器
-"<python>" <skill>/scripts/render.py --kind jiaoan --input plan.md --output 教案.docx
-"<python>" <skill>/scripts/render.py --kind xuean  --input plan.md --output 导学案.docx
-"<python>" <skill>/scripts/render.py --kind kejian --input plan.md --output 课件.pptx
+"<python>" <skill>/scripts/render.py --kind jiaoan --input doc.md --output 文档.docx
+"<python>" <skill>/scripts/render.py --kind xuean  --input doc.md --output 文档.docx
+"<python>" <skill>/scripts/render.py --kind kejian --input doc.md --output 课件.pptx
 ```
 
 参数说明：
-
-- `--kind`：`jiaoan`（教案）｜`xuean`（导学案）｜`kejian`（课件）
+- `--kind`：`jiaoan`（文档排版，页边距 2.2cm）｜`xuean`（学习材料/题单排版）｜`kejian`（课件，16:9 幻灯片排版）
 - `--math-mode`：
   - `native`（默认）——Office 原生公式，双击可编辑。
-  - `image`——公式一律转为矢量图片。**仅 DOCX（教案、导学案）支持**；
-    用于 PPTX 会直接报错（见下方"已知边界"）。
-  - `auto`——先用原生，转换失败时自动退回矢量图片（DOCX）。
-    PPTX 下等同 `native`：转换失败时按原文保留并给出警告。
+  - `image`——公式一律转为矢量图片。**仅 DOCX 支持**；PPTX 不支持此选项。
+  - `auto`——优先使用原生公式，转换失败时自动退回矢量图片（DOCX）。
 - `--work-dir`：图片与中间产物的输出目录，默认为输出文件同级的 `_assets/`
 
 输出 JSON 含 `math`（公式数）、`figures`（图象数）、`warnings`。**`warnings` 必须逐条查看。**
 
-### 第 4 步：质检（必做）
+### 第 4 步：公式与排版质检（必做）
 
 ```bash
-"<python>" <skill>/scripts/qa_check.py 教案.docx --kind jiaoan
+"<python>" <skill>/scripts/qa_check.py 文档.docx
 "<python>" <skill>/scripts/qa_check.py 课件.pptx --kind kejian
 ```
 
-退出码 0 才算通过。**不要把"脚本没报错"当成"文件没问题"**——
-`warnings` 与质检输出都要逐条确认，必要时打开文件核对。
+质检脚本专职检查：
+- 是否残留 `$` 定界符或裸露的 LaTeX 命令；
+- 是否存在未修正的重音结构或空文本 run；
+- 公式内中文是否缺失中文字体导致方框；
+- PPT 文本框与形状是否越出画布边界。
+
+退出码 0 才算通过。
+
+> **关于"未发现原生公式对象"**：该提示只在「既无原生公式对象、也无任何图片」时判为问题。
+> 若本次使用 `--math-mode image`，公式本就以矢量图片呈现，脚本会输出一条**提示**而非错误，
+> 退出码仍为 0。反之，纯文字材料若既无公式也无图片，则会正常报错。
 
 ### 第 5 步：交付
 
-用 `present_files` 把生成的文件给用户，并说明公式是 Word/PowerPoint 原生对象、双击可编辑。
+将生成的文件给用户，并说明公式是 Word/PowerPoint 原生对象、双击可自由编辑。
 
 ## 脚本清单
 
@@ -108,7 +126,7 @@ python <skill>/scripts/bootstrap.py
 | `scripts/mathimg.py`、`scripts/mathjax_tex2svg.js` | 公式降级为 SVG/PNG |
 | `scripts/figures.py` | 函数图象绘制（matplotlib） |
 | `scripts/render.py` | Markdown → DOCX/PPTX 渲染器 |
-| `scripts/qa_check.py` | 生成后自动质检 |
+| `scripts/qa_check.py` | 公式完整性与排版越界质检 |
 
 ## Markdown 支持的语法
 
@@ -117,11 +135,10 @@ python <skill>/scripts/bootstrap.py
 课题: 二次函数的图象与性质
 学科: 数学
 年级: 九年级
-课时: 第 2 课时
 ---
 
-# 一级标题（教案标题 / 课件封面）
-## 二级标题（教案板块 / 课件每页标题）
+# 一级标题（文档标题 / 课件封面）
+## 二级标题（大板块 / 课件每页标题）
 ### 三级标题
 
 普通段落，行内公式写作 $x^2 + 2x + 1$，中文标点照常使用。
@@ -202,6 +219,9 @@ $$x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}$$
   目录而不是锁定单一位置，因此全局安装的包同样能被找到。
   无 Node 时 `--math-mode image` 不可用，但原生公式不受影响。
 - **课件文字量**：课件每页正文建议不超过 6 行。脚本不会自动缩排，文字过多会溢出幻灯片。
+- **课件版式**：输出为 16:9（13.333 × 7.5 英寸）。`render.py` 会在保存后把
+  `sldSz` 的版式标记改写为 `screen16x9`——python-pptx 默认模板会写死
+  `screen4x3`，导致部分阅读器按 4:3 打开（右侧留白或被裁切）。
 
 ## 常见故障排查
 
